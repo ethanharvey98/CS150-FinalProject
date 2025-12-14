@@ -276,11 +276,15 @@ class Downsample(torch.nn.Module):
         _ = t
         return self.conv(x)
     
+    
 class SafeDownsample(Downsample):
+    
     def forward(self, x: torch.Tensor, t: torch.Tensor):
-        if min(x.shape[-2:]) > 2:
-            x = self.conv(x)
-        return x
+        # `t` is not used, but it's kept in the arguments because for the attention layer function signature
+        # to match with `ResidualBlock`.
+        _ = t
+        return self.conv(x) if min(x.shape[-2:]) > 2 else x
+    
     
 class UNet(torch.nn.Module):
     """
@@ -323,7 +327,7 @@ class UNet(torch.nn.Module):
                 in_channels = out_channels
             # Down sample at all resolutions except the last
             if i < n_resolutions - 1:
-                down.append(Downsample(in_channels))
+                down.append(SafeDownsample(in_channels))
 
         # Combine the set of modules
         self.down = torch.nn.ModuleList(down)
@@ -385,7 +389,10 @@ class UNet(torch.nn.Module):
                 x = m(x, t)
             else:
                 # Get the skip connection from first half of U-Net and concatenate
-                s = h.pop()                
+                s = h.pop()
+                diffY = s.shape[2] - x.shape[2]
+                diffX = s.shape[3] - x.shape[3]
+                x = torch.nn.functional.pad(x, [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
                 x = torch.cat((x, s), dim=1)
                 #
                 x = m(x, t)
@@ -393,42 +400,65 @@ class UNet(torch.nn.Module):
         # Final normalization and convolution        
         return self.final(self.act(self.norm(x)))
     
-class EnhanceUNet(UNet):
+class UpscaleUNet(UNet):
+    """
+    ## Upscale U-Net
+    """
+    
     def __init__(self, image_channels: int = 3, n_channels: int = 64,
                  ch_mults: Union[Tuple[int, ...], List[int]] = (1, 2, 2, 4),
                  is_attn: Union[Tuple[bool, ...], List[bool]] = (False, False, True, True),
                  n_blocks: int = 2):
+        """
+        * `image_channels` is the number of channels in the image. $3$ for RGB.
+        * `n_channels` is number of channels in the initial feature map that we transform the image into
+        * `ch_mults` is the list of channel numbers at each resolution. The number of channels is `ch_mults[i] * n_channels`
+        * `is_attn` is a list of booleans that indicate whether to use attention at each resolution
+        * `n_blocks` is the number of `UpDownBlocks` at each resolution
+        """        
         super().__init__(image_channels=image_channels, n_channels=n_channels, ch_mults=ch_mults, is_attn=is_attn, n_blocks=n_blocks)
         
+        # Final normalization and up-convolution
         self.up0 = Upsample(n_channels)
         self.dec0 = UpBlock(n_channels // 2, n_channels // 2, n_channels * 4, True)
         self.final = torch.nn.Conv2d(n_channels // 2, image_channels, kernel_size=(3, 3), padding=(1, 1))        
 
     def forward(self, x: torch.Tensor, t: torch.Tensor):
+        """
+        * `x` has shape `[batch_size, in_channels, height, width]`
+        * `t` has shape `[batch_size]`
+        """
 
+        # Get time-step embeddings
         t = self.time_emb(t)
 
+        # Get image projection
         x = self.image_proj(x)
 
+        # `h` will store outputs at each resolution for skip connection
         h = [x]
+        # First half of U-Net
         for m in self.down:
             x = m(x, t)
             h.append(x)
 
+        # Middle (bottom)
         x = self.middle(x, t)
 
+        # Second half of U-Net
         for m in self.up:
             if isinstance(m, Upsample):
                 x = m(x, t)
             else:
+                # Get the skip connection from first half of U-Net and concatenate
                 s = h.pop()
-                
                 diffY = s.shape[2] - x.shape[2]
                 diffX = s.shape[3] - x.shape[3]
                 x = torch.nn.functional.pad(x, [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
-                
                 x = torch.cat((x, s), dim=1)
+                #
                 x = m(x, t)
 
+        # Final normalization and up-convolution
         return self.final(self.dec0(self.up0(self.act(self.norm(x)), t), t))
         
