@@ -17,6 +17,11 @@ class DDPM(torch.nn.Module):
     @property
     def betas(self):
         return torch.nn.functional.softplus(self.raw_betas)
+    
+    def alpha_bar(self): 
+        alphas = 1.0 - self.betas
+        alphas_cumprod = torch.cumprod(alphas, dim=0)
+        return alphas_cumprod
 
     def forward(self, x_0):
         batch_size = len(x_0)
@@ -45,6 +50,11 @@ class UpscalingDDPM(torch.nn.Module):
     @property
     def betas(self):
         return torch.nn.functional.softplus(self.raw_betas)
+    
+    def alpha_bar(self): 
+        alphas = 1.0 - self.betas
+        alphas_cumprod = torch.cumprod(alphas, dim=0)
+        return alphas_cumprod
 
     def forward(self, x_0):
         batch_size = len(x_0)
